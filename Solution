@@ -1,0 +1,224 @@
+import os
+from PIL import Image
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader, Dataset
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torchvision.utils import save_image
+
+# Define the dataset class
+class ProductImageDataset(Dataset):
+    def __init__(self, image_dir, transform=None):
+        self.image_dir = image_dir
+        self.transform = transform
+        self.image_filenames = [os.path.join(image_dir, file) for file in os.listdir(image_dir) if file.endswith('.jpg')]
+
+    def __len__(self):
+        return len(self.image_filenames)
+
+    def __getitem__(self, idx):
+        img_path = self.image_filenames[idx]
+        image = Image.open(img_path).convert("RGB")
+        if self.transform:
+            image = self.transform(image)
+        return image
+
+# Transformations for the dataset
+transform = transforms.Compose([
+    transforms.Resize((64, 64)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
+])
+
+# Directory containing the images
+image_dir = 'C:\\Users\\dharn\\OneDrive\\Documents\\AI_ML Material\\CaseStudy 2\\archive\\fashion-dataset\\images'
+dataset = ProductImageDataset(image_dir, transform)
+dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+# Define the generator
+class Generator(nn.Module):
+    def __init__(self, nz, nc, ngf):
+        super(Generator, self).__init__()
+        self.main = nn.Sequential(
+            nn.ConvTranspose2d(nz, ngf * 8, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(ngf * 8),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 4),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 2),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(ngf * 2, ngf, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(ngf, nc, 4, 2, 1, bias=False),
+            nn.Tanh()
+        )
+
+    def forward(self, input):
+        return self.main(input)
+
+# Define the discriminator
+class Discriminator(nn.Module):
+    def __init__(self, nc, ndf):
+        super(Discriminator, self).__init__()
+        self.main = nn.Sequential(
+            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, input):
+        return self.main(input).view(-1)
+
+# Ensure you have an output directory
+os.makedirs('output', exist_ok=True)
+
+# Hyperparameters
+nz = 128  # Size of z latent vector (i.e. size of generator input)
+ngf = 64  # Size of feature maps in generator
+ndf = 64  # Size of feature maps in discriminator
+nc = 3    # Number of color channels in the input images
+num_epochs = 5
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Create the generator and discriminator
+netG = Generator(nz, nc, ngf).to(device)
+netD = Discriminator(nc, ndf).to(device)
+
+# Initialize BCELoss function
+criterion = nn.BCELoss()
+
+# Create batch of latent vectors for visualization
+fixed_noise = torch.randn(64, nz, 1, 1, device=device)
+
+# Setup Adam optimizers for both G and D
+optimizerD = optim.Adam(netD.parameters(), lr=0.0002, betas=(0.5, 0.999))
+optimizerG = optim.Adam(netG.parameters(), lr=0.0002, betas=(0.5, 0.999))
+
+# Training Loop
+for epoch in range(num_epochs):
+    for i, data in enumerate(dataloader, 0):
+        # (1) Update D network: maximize log(D(x)) + log(1 - D(G(z)))
+        netD.zero_grad()
+        real_cpu = data.to(device)
+        b_size = real_cpu.size(0)
+        label = torch.full((b_size,), 1., dtype=torch.float, device=device)
+        output = netD(real_cpu).view(-1)
+        errD_real = criterion(output, label)
+        errD_real.backward()
+        D_x = output.mean().item()
+
+        # Train with all-fake batch
+        noise = torch.randn(b_size, nz, 1, 1, device=device)
+        fake = netG(noise)
+        label.fill_(0.)
+        output = netD(fake.detach()).view(-1)
+        errD_fake = criterion(output, label)
+        errD_fake.backward()
+        D_G_z1 = output.mean().item()
+        errD = errD_real + errD_fake
+        optimizerD.step()
+
+        # (2) Update G network: maximize log(D(G(z)))
+        netG.zero_grad()
+        label.fill_(1.)  # fake labels are real for generator cost
+        output = netD(fake).view(-1)
+        errG = criterion(output, label)
+        errG.backward()
+        D_G_z2 = output.mean().item()
+        optimizerG.step()
+
+        # Output training stats
+        if i % 50 == 0:
+            print(f'[{epoch}/{num_epochs}][{i}/{len(dataloader)}] '
+                  f'Loss_D: {errD.item():.4f} Loss_G: {errG.item():.4f} '
+                  f'D(x): {D_x:.4f} D(G(z)): {D_G_z1:.4f} / {D_G_z2:.4f}')
+
+    # Generate and save images for visualization
+    with torch.no_grad():
+        fake = netG(fixed_noise).detach().cpu()
+    save_image(fake, f'output/fake_images_epoch_{epoch}.png', normalize=True)
+
+# Save models
+torch.save(netG.state_dict(), 'generator_final.pth')
+torch.save(netD.state_dict(), 'discriminator_final.pth')
+
+# Generate final batch of images
+with torch.no_grad():
+    fake = netG(fixed_noise).detach().cpu()
+save_image(fake, 'output/final_fake_images.png', normalize=True)
+
+import cv2
+import numpy as np
+
+# Function to overlay the product image on the customer image
+def overlay_images(background, overlay, position=(0, 0)):
+    h, w, _ = overlay.shape
+    rows, cols, _ = background.shape
+
+    # Ensure the overlay doesn't go out of bounds
+    y, x = position
+    if y + h > rows or x + w > cols:
+        raise ValueError("Overlay image goes out of bounds")
+
+    # Create masks for blending
+    overlay_gray = cv2.cvtColor(overlay, cv2.COLOR_BGR2GRAY)
+    ret, mask = cv2.threshold(overlay_gray, 1, 255, cv2.THRESH_BINARY)
+    mask_inv = cv2.bitwise_not(mask)
+
+    # Black-out the area of overlay in ROI
+    roi = background[y:y+h, x:x+w]
+    bg = cv2.bitwise_and(roi, roi, mask=mask_inv)
+
+    # Take only region of overlay image
+    fg = cv2.bitwise_and(overlay, overlay, mask=mask)
+
+    # Put overlay in ROI and modify the main image
+    dst = cv2.add(bg, fg)
+    background[y:y+h, x:x+w] = dst
+
+    return background
+
+# Load customer image
+customer_image_path = 'path_to_customer_image.jpg'
+customer_image = cv2.imread(customer_image_path)
+customer_image = cv2.cvtColor(customer_image, cv2.COLOR_BGR2RGB)
+
+# Generate a product image using the trained generator
+with torch.no_grad():
+    noise = torch.randn(1, nz, 1, 1, device=device)
+    generated_product = netG(noise).detach().cpu()
+generated_product_image = generated_product.squeeze(0).permute(1, 2, 0).numpy()
+generated_product_image = (generated_product_image * 0.5 + 0.5) * 255
+generated_product_image = generated_product_image.astype(np.uint8)
+
+# Convert the generated image to BGR for OpenCV compatibility
+generated_product_image = cv2.cvtColor(generated_product_image, cv2.COLOR_RGB2BGR)
+
+# Resize generated product image to match the desired size for overlay
+generated_product_image = cv2.resize(generated_product_image, (desired_width, desired_height))
+
+# Overlay the generated product image onto the customer image
+position = (x_position, y_position)  # Specify the position where the product image should be placed
+result_image = overlay_images(customer_image, generated_product_image, position)
+
+# Convert the result image back to RGB for visualization
+result_image = cv2.cvtColor(result_image, cv2.COLOR_BGR2RGB)
+
+# Save or display the result image
+result_image_path = 'output/virtual_try_on_result.png'
+cv2.imwrite(result_image_path, cv2.cvtColor(result_image, cv2.COLOR_RGB2BGR))
+print(f"Virtual try-on image saved to {result_image_path}")
